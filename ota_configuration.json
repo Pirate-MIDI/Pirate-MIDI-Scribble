@@ -1,0 +1,8 @@
+{
+	"Configurations": [
+	  {
+		 "Version": "2.0.0",
+		 "URL": "https://raw.githubusercontent.com/Pirate-MIDI/Pirate-MIDI-CLiCK-V2/refs/heads/main/Firmware/.pio/build/click/click_v0.1.0.0.bin"
+	  }
+	]
+ }
