@@ -79,16 +79,20 @@ jobs:
           echo "New release tag: ${{env.newRelease_tag_name}}"
           cat newRelease.json
           
-      - name: Upload Release Asset
+      - name: Upload Release Assets
         if: contains(env.release_0_name, 'alpha') != true && contains(env.release_0_name, 'diagnostic') != true
-        id: uploadReleaseAsset
-        uses: AButler/upload-release-assets@v2.0
-        with:
-          files: |
-            assets/*.bin
-            assets/*.json
-          repo-token: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
-          release-tag: "${{env.newRelease_tag_name}}"
+        run: |
+          for asset in assets/*.bin assets/*.json; do
+            [ -f "$asset" ] || continue
+            filename=$(basename "$asset")
+            echo "Uploading $filename..."
+            curl -X POST \
+              -H "Authorization: token ${{ secrets.PUBLIC_RELEASE_TOKEN }}" \
+              -H "Content-Type: application/octet-stream" \
+              "https://uploads.github.com/repos/Pirate-MIDI/Pirate-MIDI-Scribble/releases/${{ env.newRelease_id }}/assets?name=${filename}" \
+              --data-binary @"$asset"
+            echo ""
+          done
 
       - name: Debug
         run: |
