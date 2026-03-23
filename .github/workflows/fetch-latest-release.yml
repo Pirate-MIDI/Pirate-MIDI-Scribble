@@ -74,7 +74,11 @@ jobs:
         with:
           filename: 'newRelease.json'
           prefix: newRelease
-      
+      - name: Debug New Release
+        run: |
+          echo "New release tag: ${{env.newRelease_tag_name}}"
+          cat newRelease.json
+          
       - name: Upload Release Asset
         if: contains(env.release_0_name, 'alpha') != true && contains(env.release_0_name, 'diagnostic') != true
         id: uploadReleaseAsset
