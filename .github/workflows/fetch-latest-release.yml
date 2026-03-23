@@ -42,14 +42,33 @@ jobs:
       - name: Create Mirror Release
         if: contains(env.release_0_name, 'alpha') != true && contains(env.release_0_name, 'diagnostic') != true
         id: createRelease
+        env:
+          BODY: ${{ env.release_0_body }}
+          TAG: ${{ env.release_0_tag_name }}
+          NAME: ${{ env.release_0_name }}
+          PRERELEASE: ${{ env.release_0_prerelease }}
         run: |
+          payload=$(jq -n \
+            --arg tag "$TAG" \
+            --arg name "$NAME" \
+            --arg body "$BODY" \
+            --argjson prerelease "$PRERELEASE" \
+            '{
+              tag_name: $tag,
+              target_commitish: "main",
+              name: $name,
+              body: $body,
+              draft: false,
+              prerelease: $prerelease,
+              generate_release_notes: false
+            }')
           curl \
           -X POST \
           -H "Accept: application/vnd.github.v3+json" \
           -H "Authorization: token ${{ secrets.PUBLIC_RELEASE_TOKEN }}" \
           https://api.github.com/repos/Pirate-MIDI/Pirate-MIDI-Scribble/releases \
-          -d '{"tag_name":"${{env.release_0_tag_name}}","target_commitish":"main","name":"${{env.release_0_name}}","body":${{toJson(env.release_0_body)}},"draft":false,"prerelease":${{env.release_0_prerelease}},"generate_release_notes":false}' -o newRelease.json
-      
+          -d "$payload" -o newRelease.json
+          
       - name: JSON to Variables New Release
         uses: antifree/json-to-variables@v1.0.1
         with:
