@@ -85,3 +85,10 @@ jobs:
             assets/*.json
           repo-token: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
           release-tag: "${{env.newRelease_tag_name}}"
+
+      - name: Debug
+        run: |
+          echo "Tag: ${{env.release_0_tag_name}}"
+          echo "Name: ${{env.release_0_name}}"
+          cat release.json
+          ls -la assets/
