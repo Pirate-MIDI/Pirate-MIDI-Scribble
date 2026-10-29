@@ -31,7 +31,7 @@ jobs:
         with:
           repo: 'Pirate-MIDI/Scribble'
           version: 'tags/${{env.release_0_tag_name}}'
-          file: "scribble"
+          file: ".*"   # changed: every asset (info.json + per-variant zips)
           regex: true
           target: 'assets/'
           token: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
@@ -82,7 +82,7 @@ jobs:
       - name: Upload Release Assets
         if: contains(env.release_0_name, 'alpha') != true && contains(env.release_0_name, 'diagnostic') != true
         run: |
-          for asset in assets/*.bin assets/*.json; do
+          for asset in assets/*; do   # changed: every downloaded file, not just .bin/.json
             [ -f "$asset" ] || continue
             filename=$(basename "$asset")
             echo "Uploading $filename..."
