@@ -2,7 +2,11 @@ on:
   repository_dispatch:
     types:
     - release
-  
+
+# Needed by "Publish OTA tree": GITHUB_TOKEN pushes the `ota` branch of this repo.
+permissions:
+  contents: write
+
 jobs:
   publishRelease:
     runs-on: ubuntu-latest
@@ -14,16 +18,16 @@ jobs:
           -H "Accept: application/vnd.github.v3+json" \
           -H "Authorization: token ${{ secrets.PUBLIC_RELEASE_TOKEN }}" \
           https://api.github.com/repos/Pirate-MIDI/Scribble/releases -o release.json
-          
+
       - name: JSON to Variables Release
         uses: antifree/json-to-variables@v1.0.1
         with:
           filename: 'release.json'
           prefix: release
-          
+
       - name: Create New Assets Folder
         run: mkdir ./assets
-        
+
       - name: Download Release Assets
         if: contains(env.release_0_name, 'alpha') != true && contains(env.release_0_name, 'diagnostic') != true
         id: downloadAssets
@@ -35,10 +39,10 @@ jobs:
           regex: true
           target: 'assets/'
           token: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
-          
+
       - name: Echo Downloaded Assets
         run: ls assets
-        
+
       - name: Create Mirror Release
         if: contains(env.release_0_name, 'alpha') != true && contains(env.release_0_name, 'diagnostic') != true
         id: createRelease
@@ -68,7 +72,7 @@ jobs:
           -H "Authorization: token ${{ secrets.PUBLIC_RELEASE_TOKEN }}" \
           https://api.github.com/repos/Pirate-MIDI/Pirate-MIDI-Scribble/releases \
           -d "$payload" -o newRelease.json
-          
+
       - name: JSON to Variables New Release
         uses: antifree/json-to-variables@v1.0.1
         with:
@@ -78,7 +82,7 @@ jobs:
         run: |
           echo "New release tag: ${{env.newRelease_tag_name}}"
           cat newRelease.json
-          
+
       - name: Upload Release Assets
         if: contains(env.release_0_name, 'alpha') != true && contains(env.release_0_name, 'diagnostic') != true
         run: |
@@ -93,6 +97,83 @@ jobs:
               --data-binary @"$asset"
             echo ""
           done
+
+      # ── OTA pull tree ──────────────────────────────────────────────────────────
+      # Devices read real files over raw.githubusercontent.com and never unzip:
+      #   https://raw.githubusercontent.com/Pirate-MIDI/Pirate-MIDI-Scribble/ota/<channel>/info.json
+      #   https://raw.githubusercontent.com/Pirate-MIDI/Pirate-MIDI-Scribble/ota/<channel>/<slug>/<variant>/manifest.json
+      #   https://raw.githubusercontent.com/Pirate-MIDI/Pirate-MIDI-Scribble/ota/<channel>/<slug>/<variant>/<fileName>
+      # <channel> = latest-release (stable) | latest-prerelease (beta/rc). A stable
+      # release is written to BOTH, so devices on a prerelease move to the stable.
+      # The tree lives on an orphan branch `ota`, rewritten as ONE root commit per
+      # publish, so binaries never accumulate in main's history.
+      # Layout per variant = the convention's §4.2 staging layout (what release.py
+      # zips up): manifest.json + bins, flat.
+      - name: Publish OTA tree
+        if: contains(env.release_0_name, 'alpha') != true && contains(env.release_0_name, 'diagnostic') != true
+        env:
+          TAG: ${{ env.release_0_tag_name }}
+          PRERELEASE: ${{ env.release_0_prerelease }}
+          REPO: Pirate-MIDI/Pirate-MIDI-Scribble
+          BRANCH: ota
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # firmware-release-naming §6: <slug>_<variant>_v<semver>
+          STEM_RE='^([a-z0-9]+(-[a-z0-9]+)*)_([0-9]+)_v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+
+          # 1. Build ./tree from the downloaded assets and validate it (fail loud, publish nothing).
+          [ -f assets/info.json ] || { echo "::error::info.json missing from release assets"; exit 1; }
+          rm -rf tree && mkdir tree && cp assets/info.json tree/info.json
+          info_ver=$(jq -r .version tree/info.json)
+          count=0
+          for z in assets/*.zip; do
+            [ -f "$z" ] || continue
+            stem=$(basename "$z" .zip)
+            [[ "$stem" =~ $STEM_RE ]] || { echo "::error::zip name '$stem' violates the release-name convention"; exit 1; }
+            slug=${stem%%_*}; rest=${stem#*_}; variant=${rest%%_*}
+            dir="tree/$slug/$variant"
+            mkdir -p "$dir" && unzip -q -o "$z" -d "$dir"
+            [ -f "$dir/manifest.json" ] || { echo "::error::$stem: no manifest.json at zip root"; exit 1; }
+            jq -e --arg s "$slug" --argjson v "$variant" --arg ver "$info_ver" \
+              '.model==$s and .variant==$v and .version==$ver' "$dir/manifest.json" >/dev/null \
+              || { echo "::error::$stem: manifest model/variant/version disagree with the zip name or info.json"; exit 1; }
+            jq -e --arg s "$slug" --argjson v "$variant" \
+              '.models[] | select(.model==$s) | .variants[] | select(.variant==$v)' tree/info.json >/dev/null \
+              || { echo "::error::$stem: not listed in info.json"; exit 1; }
+            jq -r '.. | objects | .fileName? // empty' "$dir/manifest.json" | while read -r f; do
+              [ -f "$dir/$f" ] || { echo "::error::$stem: manifest names '$f' but the zip lacks it"; exit 1; }
+            done
+            count=$((count+1))
+          done
+          [ "$count" -gt 0 ] || { echo "::error::no per-variant zips in release assets"; exit 1; }
+          echo "Tree for $TAG ($count variant(s)):"; find tree -type f | sort
+
+          # 2. Fetch the current ota branch (if any) so the other channel's folder survives.
+          url="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
+          rm -rf ota
+          if git clone --quiet --depth 1 --branch "$BRANCH" "$url" ota 2>/dev/null; then
+            echo "Existing $BRANCH branch fetched"
+          else
+            mkdir ota && git -C ota init --quiet && git -C ota remote add origin "$url"
+          fi
+
+          # 3. Replace the channel folder(s). Stable -> both; prerelease -> latest-prerelease only.
+          channels="latest-prerelease"
+          [ "$PRERELEASE" = "true" ] || channels="latest-release latest-prerelease"
+          for ch in $channels; do
+            rm -rf "ota/$ch" && cp -r tree "ota/$ch"
+          done
+
+          # 4. One fresh root commit (no history), force-pushed.
+          cd ota
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --quiet --orphan publish
+          git add -A
+          git commit --quiet -m "OTA tree: $TAG -> $channels"
+          git push --quiet --force origin "publish:$BRANCH"
+          echo "Published $TAG to: $channels (branch $BRANCH)"
 
       - name: Debug
         run: |
