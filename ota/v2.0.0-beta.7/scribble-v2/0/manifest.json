@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0-beta.7",
+  "family": "scribble",
+  "model": "scribble-v2",
+  "variant": 0,
+  "versionBeforeErase": "2.0.0-beta.5",
+  "manualEraseRequired": false,
+  "bootloader": {
+    "address": "0x0000",
+    "fileName": "bootloader_scribble-v2_0_v2.0.0-beta.7.bin"
+  },
+  "partitions": {
+    "address": "0x8000",
+    "fileName": "partitions_scribble-v2_0_v2.0.0-beta.7.bin"
+  },
+  "ota": {
+    "address": "0x19000",
+    "fileName": "ota_scribble-v2_0_v2.0.0-beta.7.bin"
+  },
+  "application": {
+    "address": "0x20000",
+    "fileName": "scribble-v2_0_v2.0.0-beta.7.bin"
+  }
+}

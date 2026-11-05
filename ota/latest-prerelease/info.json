@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0-beta.7",
+  "family": "scribble",
+  "released_at": "2026-11-05T02:17:21Z",
+  "prerelease": true,
+  "channel": "beta",
+  "models": [
+    {
+      "model": "scribble",
+      "variants": [
+        {
+          "variant": 0,
+          "ota": false
+        }
+      ]
+    },
+    {
+      "model": "scribble-2",
+      "variants": [
+        {
+          "variant": 0,
+          "ota": true
+        }
+      ]
+    },
+    {
+      "model": "scribble-v2",
+      "variants": [
+        {
+          "variant": 0,
+          "ota": true
+        }
+      ]
+    }
+  ],
+  "git_sha": "07230da",
+  "path": "v2.0.0-beta.7"
+}
