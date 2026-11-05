@@ -3,7 +3,7 @@ on:
     types:
     - release
 
-# Needed by "Publish OTA tree": GITHUB_TOKEN pushes the `ota` branch of this repo.
+# Needed by "Publish OTA tree": GITHUB_TOKEN commits the ota/ tree to main.
 permissions:
   contents: write
 
@@ -98,34 +98,46 @@ jobs:
             echo ""
           done
 
-      # ── OTA pull tree ──────────────────────────────────────────────────────────
-      # Devices read real files over raw.githubusercontent.com and never unzip:
-      #   https://raw.githubusercontent.com/Pirate-MIDI/Pirate-MIDI-Scribble/ota/<channel>/info.json
-      #   https://raw.githubusercontent.com/Pirate-MIDI/Pirate-MIDI-Scribble/ota/<channel>/<slug>/<variant>/manifest.json
-      #   https://raw.githubusercontent.com/Pirate-MIDI/Pirate-MIDI-Scribble/ota/<channel>/<slug>/<variant>/<fileName>
-      # <channel> = latest-release (stable) | latest-prerelease (beta/rc). A stable
-      # release is written to BOTH, so devices on a prerelease move to the stable.
-      # The tree lives on an orphan branch `ota`, rewritten as ONE root commit per
-      # publish, so binaries never accumulate in main's history.
-      # Layout per variant = the convention's §4.2 staging layout (what release.py
-      # zips up): manifest.json + bins, flat.
+      # ── OTA pull tree (ota/ on main) ───────────────────────────────────────────
+      # Devices and the editor read real files over raw.githubusercontent.com and never
+      # unzip. EVERY published release is kept (users can roll back), one folder each:
+      #   ota/releases.json                 every release, newest first; each entry is that
+      #                                     release's info.json plus "path"
+      #   ota/latest-release/info.json      newest STABLE release's info.json + "path"
+      #   ota/latest-prerelease/info.json   newest release of any kind (beta/rc or stable) + "path"
+      #   ota/v<semver>/info.json           that release
+      #   ota/v<semver>/<slug>/<variant>/manifest.json + the bins it names, flat
+      #                                     (= the convention's §4.2 staging layout, what release.py zips)
+      # A device GETs <channel>/info.json, reads "path", then <path>/<slug>/<variant>/manifest.json.
+      # Stable vs prerelease comes from the SEMVER alone (a "-" suffix = prerelease); the
+      # GitHub pre-release flag is not used. releases.json and both pointers are regenerated
+      # from the folders present on every run, so re-running an old release is harmless and
+      # never moves a pointer backwards.
       - name: Publish OTA tree
         if: contains(env.release_0_name, 'alpha') != true && contains(env.release_0_name, 'diagnostic') != true
         env:
           TAG: ${{ env.release_0_tag_name }}
-          PRERELEASE: ${{ env.release_0_prerelease }}
           REPO: Pirate-MIDI/Pirate-MIDI-Scribble
-          BRANCH: ota
+          BRANCH: main
+          OTA_DIR: ota
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # firmware-release-naming §6: <slug>_<variant>_v<semver>
           STEM_RE='^([a-z0-9]+(-[a-z0-9]+)*)_([0-9]+)_v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
 
+          # 0. Tag gate: alpha/diagnostic never reach the tree (second gate after the step `if:`).
+          case "$TAG" in
+            *alpha*|*diagnostic*) echo "::error::tag '$TAG' must never reach the OTA tree"; exit 1 ;;
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::tag '$TAG' is not v<semver>"; exit 1 ;;
+          esac
+
           # 1. Build ./tree from the downloaded assets and validate it (fail loud, publish nothing).
           [ -f assets/info.json ] || { echo "::error::info.json missing from release assets"; exit 1; }
           rm -rf tree && mkdir tree && cp assets/info.json tree/info.json
           info_ver=$(jq -r .version tree/info.json)
+          [ "$TAG" = "v$info_ver" ] || { echo "::error::tag '$TAG' != info.json version '$info_ver'"; exit 1; }
           count=0
           for z in assets/*.zip; do
             [ -f "$z" ] || continue
@@ -149,31 +161,68 @@ jobs:
           [ "$count" -gt 0 ] || { echo "::error::no per-variant zips in release assets"; exit 1; }
           echo "Tree for $TAG ($count variant(s)):"; find tree -type f | sort
 
-          # 2. Fetch the current ota branch (if any) so the other channel's folder survives.
+          # 2. Clone main and drop this release in as ota/v<semver>/ (replacing any earlier copy of
+          #    the same version; every other version folder is untouched).
           url="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
-          rm -rf ota
-          if git clone --quiet --depth 1 --branch "$BRANCH" "$url" ota 2>/dev/null; then
-            echo "Existing $BRANCH branch fetched"
-          else
-            mkdir ota && git -C ota init --quiet && git -C ota remote add origin "$url"
-          fi
+          rm -rf pub
+          git clone --quiet --depth 1 --branch "$BRANCH" "$url" pub
+          dest="pub/$OTA_DIR/v$info_ver"
+          rm -rf "$dest" && mkdir -p "pub/$OTA_DIR" && cp -r tree "$dest"
 
-          # 3. Replace the channel folder(s). Stable -> both; prerelease -> latest-prerelease only.
-          channels="latest-prerelease"
-          [ "$PRERELEASE" = "true" ] || channels="latest-release latest-prerelease"
-          for ch in $channels; do
-            rm -rf "ota/$ch" && cp -r tree "ota/$ch"
-          done
+          # 3. Regenerate releases.json + the two channel pointers from every ota/v*/info.json present.
+          #    Ordering is semver (prerelease < release; dotted identifiers compared per semver §11).
+          python3 - "pub/$OTA_DIR" <<'PY'
+          import json, pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+          SEMVER = re.compile(r'^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$')
 
-          # 4. One fresh root commit (no history), force-pushed.
-          cd ota
+          def key(v):
+              m = SEMVER.match(v)
+              if not m:
+                  sys.exit(f"::error::'{v}' is not semver")
+              maj, mi, pa, pre = m.groups()
+              ids = [(0, int(p), '') if p.isdigit() else (1, 0, p) for p in pre.split('.')] if pre else []
+              return (int(maj), int(mi), int(pa), 0 if pre else 1, ids)
+
+          rels = []
+          for f in sorted(root.glob('v*/info.json')):
+              info = json.loads(f.read_text())
+              if f.parent.name != 'v' + info['version']:
+                  sys.exit(f"::error::{f}: folder name and info.json version disagree")
+              info['path'] = f.parent.name
+              rels.append(info)
+          if not rels:
+              sys.exit("::error::no ota/v*/info.json found")
+          rels.sort(key=lambda i: key(i['version']), reverse=True)
+
+          def point(name, info):
+              d = root / name
+              d.mkdir(exist_ok=True)
+              (d / 'info.json').write_text(json.dumps(info, indent=2) + '\n')
+              print(f"{name} -> {info['version']}")
+
+          (root / 'releases.json').write_text(json.dumps({'releases': rels}, indent=2) + '\n')
+          point('latest-prerelease', rels[0])                       # newest of any kind
+          stable = [r for r in rels if '-' not in r['version']]
+          if stable:
+              point('latest-release', stable[0])                    # newest stable only
+          else:
+              print("latest-release: no stable release published yet")
+          print(f"releases.json: {len(rels)} release(s): " + ', '.join(r['version'] for r in rels))
+          PY
+
+          # 4. Commit to main. A no-op (identical re-run) is not an error.
+          cd pub
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout --quiet --orphan publish
-          git add -A
-          git commit --quiet -m "OTA tree: $TAG -> $channels"
-          git push --quiet --force origin "publish:$BRANCH"
-          echo "Published $TAG to: $channels (branch $BRANCH)"
+          git add -A -- "$OTA_DIR"
+          if git diff --cached --quiet; then
+            echo "OTA tree already up to date for $TAG"
+          else
+            git commit --quiet -m "OTA: publish $TAG"
+            git push --quiet origin "HEAD:$BRANCH"
+            echo "Published $TAG under $OTA_DIR/ on $BRANCH"
+          fi
 
       - name: Debug
         run: |
